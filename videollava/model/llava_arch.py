@@ -364,32 +364,45 @@ class LlavaMetaForCausalLM(ABC):
         batch_size = len(new_input_embeds)
 
         new_input_embeds_padded = []
+        video_embeddings = []  # 存储每个样本的视频嵌入
         new_labels_padded = torch.full((batch_size, max_len), IGNORE_INDEX, dtype=new_labels[0].dtype, device=new_labels[0].device)
         attention_mask = torch.zeros((batch_size, max_len), dtype=attention_mask.dtype, device=attention_mask.device)
         position_ids = torch.zeros((batch_size, max_len), dtype=position_ids.dtype, device=position_ids.device)
-
+        
         for i, (cur_new_embed, cur_new_labels) in enumerate(zip(new_input_embeds, new_labels)):
             cur_len = cur_new_embed.shape[0]
+            cur_video_embeddings = []  # 当前样本的视频嵌入
+            
             if getattr(self.config, 'tokenizer_padding_side', 'right') == "left":
-                new_input_embeds_padded.append(torch.cat((
+                padded_embed = torch.cat((
                     torch.zeros((max_len - cur_len, cur_new_embed.shape[1]), dtype=cur_new_embed.dtype, device=cur_new_embed.device),
                     cur_new_embed
-                ), dim=0))
+                ), dim=0)
+                new_input_embeds_padded.append(padded_embed)
+                
                 if cur_len > 0:
                     new_labels_padded[i, -cur_len:] = cur_new_labels
                     attention_mask[i, -cur_len:] = True
                     position_ids[i, -cur_len:] = torch.arange(0, cur_len, dtype=position_ids.dtype, device=position_ids.device)
             else:
-                new_input_embeds_padded.append(torch.cat((
+                padded_embed = torch.cat((
                     cur_new_embed,
                     torch.zeros((max_len - cur_len, cur_new_embed.shape[1]), dtype=cur_new_embed.dtype, device=cur_new_embed.device)
-                ), dim=0))
+                ), dim=0)
+                new_input_embeds_padded.append(padded_embed)
+                
                 if cur_len > 0:
                     new_labels_padded[i, :cur_len] = cur_new_labels
                     attention_mask[i, :cur_len] = True
                     position_ids[i, :cur_len] = torch.arange(0, cur_len, dtype=position_ids.dtype, device=position_ids.device)
-
-        new_input_embeds = torch.stack(new_input_embeds_padded, dim=0)
+            
+            # 提取视频嵌入
+            cur_input_ids = input_ids[i]  # 当前样本的输入 IDs
+            video_positions = torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0]  # 获取视频标记的索引
+            cur_video_embeddings = padded_embed[video_positions]  # 获取对应嵌入
+            video_embeddings.append(cur_video_embeddings)
+        
+            new_input_embeds = torch.stack(new_input_embeds_padded, dim=0)
 
         if _labels is None:
             new_labels = None
@@ -404,7 +417,7 @@ class LlavaMetaForCausalLM(ABC):
         if _position_ids is None:
             position_ids = None
 
-        return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels
+        return None, position_ids, attention_mask, past_key_values, video_embeddings, new_input_embeds, new_labels
 
     def initialize_vision_tokenizer(self, model_args, tokenizer):
         if model_args.mm_use_im_patch_token:
