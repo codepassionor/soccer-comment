@@ -46,7 +46,9 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         self.pretraining_tp = config.pretraining_tp
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-
+        # 添加投影层
+        self.video_projection = nn.Linear(config.hidden_size, config.projection_dim)
+        self.text_projection = nn.Linear(config.hidden_size, config.projection_dim)
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -74,6 +76,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
                 position_ids,
                 attention_mask,
                 past_key_values,
+                video_embeds,
                 inputs_embeds,
                 labels
             ) = self.prepare_inputs_labels_for_multimodal(  # 在这里将video和text 进行 align？
@@ -84,8 +87,8 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
                 labels,
                 images
             )
-
-        return super().forward(  #transformers.models.llama.modeling_llama.LlamaForCausalLM.forward
+        projected_video = self.video_projection(video_embeds)
+        output = super().forward(  #transformers.models.llama.modeling_llama.LlamaForCausalLM.forward
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -97,6 +100,23 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict
         )
+        text_embeds = output.hidden_states[-1]  # Shape: [batch_size, seq_len, hidden_dim]
+        text_embeds = text_embeds[:, :input_ids.shape[1], :]
+        projected_video = self.video_projection(video_embeds)
+        projected_text = self.text_projection(text_embeds)
+        mse_loss = nn.MSELoss()(projected_video, projected_text)
+        if labels is not None:
+          total_loss = output.loss + mse_loss
+          output = CausalLMOutputWithPast(
+              loss=total_loss,
+              logits=output.logits,
+              past_key_values=output.past_key_values,
+              hidden_states=output.hidden_states,
+              attentions=output.attentions,
+          )
+
+        return output
+        
 
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None, inputs_embeds=None, **kwargs):
         images = kwargs.pop("images", None)
